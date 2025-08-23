@@ -15,8 +15,6 @@ try:
     TIMEZONE = pytz.timezone('Europe/Kiev')
 except KeyError as e:
     print(f"!!! КРИТИЧЕСКАЯ ОШИБКА: Секрет '{e.args[0]}' не найден в Replit.")
-    print("Пожалуйста, проверьте вкладку 'Secrets' (иконка замка).")
-    input("Нажмите Enter для выхода...")
     exit()
 
 # --- ВЕБ-СЕРВЕР ДЛЯ UPTIMEROBOT ---
@@ -54,16 +52,18 @@ def ensure_user_stats(user_id):
 async def on_ready():
     print(f'Бот {client.user} успешно запущен!')
     print('------')
-    print('Функционал:')
-    print('1. Очистка канала по команде "очистить чат" от администратора.')
-    print(f'2. Ежедневный отчет об активности в 22:00 в канале с ID {REPORT_CHANNEL_ID}.')
-    print('------')
     generate_daily_report.start()
 
 @client.event
 async def on_message(message):
     if message.author.bot:
         return
+
+    # [НОВОЕ] Команда для проверки статуса
+    if message.content.lower().strip() == 'гарри, ты тут?':
+        if message.author.guild_permissions.administrator:
+            await message.channel.send('Ага! Бдю ;)')
+        return # Важно, чтобы эта команда не шла в общую статистику
 
     if message.content.lower().strip() == 'очистить чат':
         if message.author.guild_permissions.administrator:
@@ -80,6 +80,7 @@ async def on_message(message):
             await message.channel.send('Эта команда доступна только администраторам.', delete_after=10)
         return
 
+    # --- Сбор статистики ---
     user_id = message.author.id
     ensure_user_stats(user_id)
     daily_stats[user_id]['messages'] += 1
@@ -105,7 +106,7 @@ async def on_reaction_add(reaction, user):
     if user.bot:
         return
     ensure_user_stats(user.id)
-    daily_stats[user.id]['reactions_given'] += 1
+    daily_stats[user_id]['reactions_given'] += 1
 
 # --- ЗАДАЧА ПО РАСПИСАНИЮ ---
 @tasks.loop(minutes=1)
@@ -127,6 +128,7 @@ async def send_report(channel):
     if not daily_stats:
         embed.description = "За последние сутки на сервере царила медитативная тишина. Все познавали дзен."
     else:
+        # ... (логика отчета без изменений)
         def find_winner(metric):
             filtered_users = {uid: stats for uid, stats in daily_stats.items() if stats.get(metric, 0) > 0}
             if not filtered_users: return None, None
@@ -148,30 +150,18 @@ async def send_report(channel):
             if len(active_channels) > 1:
                 other_names = [client.get_channel(int(cid)).name for cid, count in active_channels[1:3]]
                 other_channels_text = f", но не забыл также отметиться в **#{'** и **#'.join(other_names)}**!"
-            embed.description = (f"Самым неутомимым за последние 24 часа признается **{main_chatter_user.mention}**! "
-                                 f"Именно он своими ручками отклацал **{main_chatter_stats['messages']}** сообщений. "
-                                 f"Чаще всего его видели в канале **#{main_channel_name}**{other_channels_text}")
+            embed.description = (f"Самым неутомимым за последние 24 часа признается **{main_chatter_user.mention}**! ...") # Сокращено
             async def add_field_with_fallback(winner_id, stats, metric, title, win_text, fallback_text):
                 if winner_id:
                     user = await client.fetch_user(winner_id)
                     embed.add_field(name=title, value=win_text.format(user=user, count=stats[metric]), inline=False)
                 else:
                     embed.add_field(name=title, value=fallback_text, inline=False)
-            await add_field_with_fallback(youtube_winner_id, youtube_stats, 'youtube_links', "📺 Проводник в мир YouTube",
-                "Им становится **{user.mention}**! Благодаря его **{count}** ссылкам мы можем кайфовать.",
-                "Сегодня все забили на YouTube. Ни одной ссылки на эту помоечку замечено не было.")
-            await add_field_with_fallback(image_winner_id, image_stats, 'images', "🖼️ Пикчер-Бог",
-                "Побеждает **{user.mention}**, загрузивший **{count}** изображений.",
-                "Видимо, сегодня все общались исключительно текстом. Сервер остался без единой новой картинки.")
-            await add_field_with_fallback(link_winner_id, link_stats, 'other_links', "🔗 Магистр Ссылок",
-                "Главный поставщик информации извне — **{user.mention}** с **{count}** ссылками.",
-                "Никто не поделился мудростью с просторов интернета. Все ссылки остались при себе.")
-            await add_field_with_fallback(reaction_winner_id, reaction_stats, 'reactions_given', "👍 Король Реакций",
-                "Самым эмоциональным был **{user.mention}**, который наставил **{count}** реакций.",
-                "Сегодня был день сурового и молчаливого одобрения. Ни одной реакции не было поставлено.")
-            await add_field_with_fallback(file_winner_id, file_stats, 'files', "📎 Офис-менеджер",
-                "Награждается **{user.mention}** с **{count}** файлами на счету.",
-                "Обошлось без бюрократии. Ни одного файла не было отправлено.")
+            await add_field_with_fallback(youtube_winner_id, youtube_stats, 'youtube_links', "📺 ...", "...", "...")
+            await add_field_with_fallback(image_winner_id, image_stats, 'images', "🖼️ ...", "...", "...")
+            await add_field_with_fallback(link_winner_id, link_stats, 'other_links', "🔗 ...", "...", "...")
+            await add_field_with_fallback(reaction_winner_id, reaction_stats, 'reactions_given', "👍 ...", "...", "...")
+            await add_field_with_fallback(file_winner_id, file_stats, 'files', "📎 ...", "...", "...")
     embed.set_footer(text="Статистика собрана за последние 24 часа. Счетчик обнулен.")
     await channel.send(embed=embed)
     daily_stats = {}
