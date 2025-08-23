@@ -1,0 +1,194 @@
+import discord
+from discord.ext import tasks
+import json
+import re
+from datetime import datetime
+import pytz
+
+# --- КОНФИГУРАЦИЯ ---
+try:
+    with open('config.json', 'r', encoding='utf-8') as f:
+        config = json.load(f)
+    TOKEN = config['DISCORD_BOT_TOKEN']
+    REPORT_CHANNEL_ID = int(config['REPORT_CHANNEL_ID'])
+    TIMEZONE = pytz.timezone('Europe/Kiev')
+except Exception as e:
+    print(f"!!! КРИТИЧЕСКАЯ ОШИБКА при чтении config.json: {e}")
+    input("Нажмите Enter для выхода...")
+    exit()
+
+# --- НАСТРОЙКА БОТА ---
+intents = discord.Intents.default()
+intents.message_content = True
+intents.reactions = True
+intents.members = True
+client = discord.Client(intents=intents)
+
+# --- ХРАНИЛИЩЕ СТАТИСТИКИ ---
+daily_stats = {}
+
+def ensure_user_stats(user_id):
+    if user_id not in daily_stats:
+        daily_stats[user_id] = {
+            'messages': 0, 'images': 0, 'files': 0,
+            'youtube_links': 0, 'other_links': 0, 'reactions_given': 0,
+            'channel_activity': {}
+        }
+
+# --- ОСНОВНЫЕ СОБЫТИЯ БОТА ---
+
+@client.event
+async def on_ready():
+    # [ИСПРАВЛЕНО] Добавлено осмысленное сообщение при запуске
+    print(f'Бот {client.user} успешно запущен и готов к работе!')
+    print('------')
+    print('Функционал:')
+    print('1. Очистка канала по команде "очистить чат" от администратора.')
+    print(f'2. Ежедневный отчет об активности в 22:00 в канале с ID {REPORT_CHANNEL_ID}.')
+    print('------')
+    generate_daily_report.start()
+
+@client.event
+async def on_message(message):
+    if message.author.bot:
+        return
+
+    if message.content.lower().strip() == 'очистить чат':
+        if message.author.guild_permissions.administrator:
+            try:
+                target_channel = message.channel
+                await target_channel.send(f'**Принято!** Начинаю полную очистку канала **#{target_channel.name}**.')
+                deleted = await target_channel.purge(limit=1000, check=lambda m: not m.pinned)
+                await target_channel.send(f'**Очистка завершена!** Удалено сообщений: **{len(deleted)}**.', delete_after=20)
+            except discord.Forbidden:
+                await message.channel.send('**Ошибка!** У меня нет права "Управлять сообщениями" в этом канале. Пожалуйста, проверьте настройки прав для моей роли в этом конкретном канале.')
+            except Exception as e:
+                await message.channel.send(f'**Ошибка!** Не удалось выполнить очистку: {e}')
+        else:
+            await message.channel.send('Эта команда доступна только администраторам.', delete_after=10)
+        return
+
+    user_id = message.author.id
+    ensure_user_stats(user_id)
+
+    daily_stats[user_id]['messages'] += 1
+    channel_id_str = str(message.channel.id)
+    if channel_id_str not in daily_stats[user_id]['channel_activity']:
+        daily_stats[user_id]['channel_activity'][channel_id_str] = 0
+    daily_stats[user_id]['channel_activity'][channel_id_str] += 1
+
+    urls = re.findall(r'https?://[^\s]+', message.content)
+    for url in urls:
+        if 'youtube.com' in url or 'youtu.be' in url:
+            daily_stats[user_id]['youtube_links'] += 1
+        else:
+            daily_stats[user_id]['other_links'] += 1
+    
+    if message.attachments:
+        for attachment in message.attachments:
+            if attachment.content_type and 'image' in attachment.content_type:
+                daily_stats[user_id]['images'] += 1
+            else:
+                daily_stats[user_id]['files'] += 1
+
+@client.event
+async def on_reaction_add(reaction, user):
+    if user.bot:
+        return
+    ensure_user_stats(user.id)
+    daily_stats[user.id]['reactions_given'] += 1
+
+
+# --- ЗАДАЧА ПО РАСПИСАНИЮ ---
+
+@tasks.loop(minutes=1)
+async def generate_daily_report():
+    now = datetime.now(TIMEZONE)
+    
+    if now.hour == 22 and now.minute == 00:
+        if not hasattr(generate_daily_report, "last_run_date") or generate_daily_report.last_run_date != now.date():
+            report_channel = client.get_channel(REPORT_CHANNEL_ID)
+            if report_channel:
+                await send_report(report_channel)
+                generate_daily_report.last_run_date = now.date()
+
+
+async def send_report(channel):
+    global daily_stats
+    
+    embed = discord.Embed(
+        title=f"📊 Суточный отчет {datetime.now(TIMEZONE).strftime('%d.%m.%Y')} | Кто вчера зажигал?",
+        color=discord.Color.blue()
+    )
+
+    if not daily_stats:
+        embed.description = "За последние сутки на сервере царила медитативная тишина. Ни одного сообщения не было написано. Все познавали дзен."
+    else:
+        def find_winner(metric):
+            filtered_users = {uid: stats for uid, stats in daily_stats.items() if stats.get(metric, 0) > 0}
+            if not filtered_users: return None, None
+            winner_id = max(filtered_users, key=lambda u: filtered_users[u][metric])
+            return winner_id, filtered_users[winner_id]
+
+        main_chatter_id, main_chatter_stats = find_winner('messages')
+        
+        if not main_chatter_id:
+             embed.description = "За последние сутки на сервере не было написано ни одного сообщения. Странная тишина..."
+        else:
+            youtube_winner_id, youtube_stats = find_winner('youtube_links')
+            image_winner_id, image_stats = find_winner('images')
+            link_winner_id, link_stats = find_winner('other_links')
+            reaction_winner_id, reaction_stats = find_winner('reactions_given')
+            file_winner_id, file_stats = find_winner('files')
+
+            main_chatter_user = await client.fetch_user(main_chatter_id)
+            active_channels = sorted(main_chatter_stats['channel_activity'].items(), key=lambda item: item[1], reverse=True)
+            main_channel_name = client.get_channel(int(active_channels[0][0])).name
+            other_channels_text = ""
+            if len(active_channels) > 1:
+                other_names = [client.get_channel(int(cid)).name for cid, count in active_channels[1:3]]
+                other_channels_text = f", но не забыл также отметиться в **#{'** и **#'.join(other_names)}**!"
+            
+            embed.description = (f"Самым неутомимым за последние 24 часа признается **{main_chatter_user.mention}**! "
+                                 f"Именно он своими ручками отклацал **{main_chatter_stats['messages']}** сообщений. "
+                                 f"Чаще всего его видели в канале **#{main_channel_name}**{other_channels_text}")
+
+            async def add_field_with_fallback(winner_id, stats, metric, title, win_text, fallback_text):
+                if winner_id:
+                    user = await client.fetch_user(winner_id)
+                    embed.add_field(name=title, value=win_text.format(user=user, count=stats[metric]), inline=False)
+                else:
+                    embed.add_field(name=title, value=fallback_text, inline=False)
+
+            await add_field_with_fallback(youtube_winner_id, youtube_stats, 'youtube_links', "📺 Проводник в мир YouTube",
+                "Им становится **{user.mention}**! Благодаря его **{count}** ссылкам мы можем кайфовать.",
+                "Сегодня все забили на YouTube. Ни одной ссылки на эту помоечку замечено не было.")
+            
+            await add_field_with_fallback(image_winner_id, image_stats, 'images', "🖼️ Пикчер-Бог",
+                "Побеждает **{user.mention}**, загрузивший **{count}** изображений.",
+                "Видимо, сегодня все общались исключительно текстом. Сервер остался без единой новой картинки.")
+
+            await add_field_with_fallback(link_winner_id, link_stats, 'other_links', "🔗 Магистр Ссылок",
+                "Главный поставщик информации извне — **{user.mention}** с **{count}** ссылками.",
+                "Никто не поделился мудростью с просторов интернета. Все ссылки остались при себе.")
+
+            await add_field_with_fallback(reaction_winner_id, reaction_stats, 'reactions_given', "👍 Король Реакций",
+                "Самым эмоциональным был **{user.mention}**, который наставил **{count}** реакций.",
+                "Сегодня был день сурового и молчаливого одобрения. Ни одной реакции не было поставлено.")
+
+            await add_field_with_fallback(file_winner_id, file_stats, 'files', "📎 Офис-менеджер",
+                "Награждается **{user.mention}** с **{count}** файлами на счету.",
+                "Обошлось без бюрократии. Ни одного файла не было отправлено.")
+
+    embed.set_footer(text="Статистика собрана за последние 24 часа. Счетчик обнулен.")
+    
+    await channel.send(embed=embed)
+    
+    daily_stats = {}
+
+# --- ЗАПУСК БОТА ---
+try:
+    client.run(TOKEN)
+except Exception as e:
+    print(f"!!! КРИТИЧЕСКАЯ ОШИБКА при запуске бота: {e}")
+    input("Нажмите Enter для выхода...")
