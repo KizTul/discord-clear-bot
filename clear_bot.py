@@ -4,16 +4,17 @@ import json
 import re
 from datetime import datetime
 import pytz
+import os # [НОВОЕ] Импортируем модуль 'os' для работы с переменными окружения
 
 # --- КОНФИГУРАЦИЯ ---
 try:
-    with open('config.json', 'r', encoding='utf-8') as f:
-        config = json.load(f)
-    TOKEN = config['DISCORD_BOT_TOKEN']
-    REPORT_CHANNEL_ID = int(config['REPORT_CHANNEL_ID'])
+    # [ИЗМЕНЕНО] Читаем "секреты" из переменных окружения Replit, а не из файла
+    TOKEN = os.environ['DISCORD_BOT_TOKEN']
+    REPORT_CHANNEL_ID = int(os.environ['REPORT_CHANNEL_ID'])
     TIMEZONE = pytz.timezone('Europe/Kiev')
-except Exception as e:
-    print(f"!!! КРИТИЧЕСКАЯ ОШИБКА при чтении config.json: {e}")
+except KeyError as e:
+    print(f"!!! КРИТИЧЕСКАЯ ОШИБКА: Секрет '{e.args[0]}' не найден в Replit.")
+    print("Пожалуйста, проверьте вкладку 'Secrets' (иконка замка).")
     input("Нажмите Enter для выхода...")
     exit()
 
@@ -39,8 +40,7 @@ def ensure_user_stats(user_id):
 
 @client.event
 async def on_ready():
-    # [ИСПРАВЛЕНО] Добавлено осмысленное сообщение при запуске
-    print(f'Бот {client.user} успешно запущен и готов к работе!')
+    print(f'Бот {client.user} успешно запущен!')
     print('------')
     print('Функционал:')
     print('1. Очистка канала по команде "очистить чат" от администратора.')
@@ -96,7 +96,7 @@ async def on_reaction_add(reaction, user):
     if user.bot:
         return
     ensure_user_stats(user.id)
-    daily_stats[user.id]['reactions_given'] += 1
+    daily_stats[user_id]['reactions_given'] += 1
 
 
 # --- ЗАДАЧА ПО РАСПИСАНИЮ ---
@@ -187,6 +187,24 @@ async def send_report(channel):
     daily_stats = {}
 
 # --- ЗАПУСК БОТА ---
+# [ИЗМЕНЕНО] Добавлен веб-сервер для UptimeRobot, чтобы бот не "засыпал"
+from flask import Flask
+from threading import Thread
+
+app = Flask('')
+
+@app.route('/')
+def home():
+    return "I'm alive"
+
+def run():
+    app.run(host='0.0.0.0', port=8080)
+
+def keep_alive():
+    t = Thread(target=run)
+    t.start()
+
+keep_alive()
 try:
     client.run(TOKEN)
 except Exception as e:
